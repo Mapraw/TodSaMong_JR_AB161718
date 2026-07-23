@@ -18,6 +18,28 @@ EQUIP_CELLS = {
     "Overhead Ground Wire": {"m": "H37", "c": "H38", "sf": "H39", "ss": "H41", "req_sf": "conforming with EGAT requirement (ASTM A363)"}
 }
 
+def expand_item_ranges(item_no_raw: str) -> List[str]:
+    if not item_no_raw:
+        return []
+    item_no_raw = item_no_raw.replace('\n', ',')
+    chunks = [c.strip() for c in re.split(r'[,/]| AND |&', item_no_raw.upper()) if c.strip()]
+    items = []
+    for chunk in chunks:
+        m = re.search(r'(\d+AB\d+)-(\d+)\s*(?:THRU|TO|-)\s*(?:(\d+AB\d+)-)?(\d+)', chunk, re.I)
+        if m:
+            prefix = m.group(1).upper()
+            start_num = int(m.group(2))
+            end_prefix = m.group(3)
+            end_num = int(m.group(4))
+            if end_prefix and end_prefix.upper() != prefix:
+                items.append(chunk)
+            else:
+                for n in range(start_num, end_num + 1):
+                    items.append(f"{prefix}-{n}")
+        else:
+            items.append(chunk)
+    return items
+
 class AB18Processor(BaseProcessor):
     def __init__(self, master_manufacturers: Dict[str, str], egat_pools: Tuple[List[str], List[str]]):
         self.master_manufacturers = master_manufacturers
@@ -121,6 +143,13 @@ class AB18Processor(BaseProcessor):
             status = "INCORRECT PD"
             issues.append(f"Invalid Schedule at L8: {sched}")
         
+        item_no_raw = get_cell_val(ws, COMMON_CELLS["item_no"])
+        clean_items = expand_item_ranges(item_no_raw)
+        clean_items = [it for it in clean_items if not any(term in it for term in ["TRANSPORTATION", "TOTAL PRICE", "SUMMARY"])]
+
+        if not clean_items:
+            return {}
+
         equip_data = {}
         equip_order = kwargs.get("equip_order", [])
 
@@ -167,23 +196,21 @@ class AB18Processor(BaseProcessor):
                         issues.append(f"Standard mismatch for {group_id}")
             
             if process_data:
-                eq_key = None
+                matching_keys = []
                 if "THW" in group_id or "NYY" in group_id:
-                    eq_key = next((k for k in equip_order if fuzz.token_set_ratio(group_id.upper(), k.upper()) >= 90), None)
+                    matching_keys = [k for k in equip_order if fuzz.token_set_ratio(group_id.upper(), k.upper()) >= 90]
                 elif group_id == "Control Cable":
-                    eq_key = next((k for k in equip_order if group_id.upper() in k.upper() and "TWISTED PAIR" not in k.upper()), None)
+                    matching_keys = [k for k in equip_order if group_id.upper() in k.upper() and "TWISTED PAIR" not in k.upper()]
                 else:
-                    eq_key = next((k for k in equip_order if group_id.upper() in k.upper()), None)
+                    matching_keys = [k for k in equip_order if group_id.upper() in k.upper()]
                 
-                if eq_key:
+                # Assign to all matching equipment keys that belong to clean_items
+                filtered_keys = [k for k in matching_keys if k.split()[0] in clean_items]
+                if not filtered_keys:
+                    filtered_keys = matching_keys
+                
+                for eq_key in filtered_keys:
                     equip_data[eq_key] = self.split_paired_data(m, c, sf, ss, filename, ws.title, req_standard=cells["req_sf"], group_id=group_id)
-
-        item_no_raw = get_cell_val(ws, COMMON_CELLS["item_no"])
-        clean_items = [it.strip() for it in re.split(r'[,/]| AND |&', item_no_raw.upper()) if it.strip()]
-        clean_items = [it for it in clean_items if not any(term in it for term in ["TRANSPORTATION", "TOTAL PRICE", "SUMMARY"])]
-
-        if not clean_items:
-            return {}
 
         return {
             "BidderRaw": bidder_raw,
